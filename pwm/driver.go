@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"log"
 )
 
 const (
@@ -48,6 +49,7 @@ type driver struct {
 }
 
 func (d *driver) Export(ch int) error {
+	log.Printf("PWM DEBUG: exporting channel %d at %s", ch, d.sysfs)
 	file := filepath.Join(d.sysfs, "export")
 	return d.writeFile(file, toS(ch), 0600)
 }

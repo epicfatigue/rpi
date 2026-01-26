@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
+	"log"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -53,6 +54,7 @@ type bus struct {
 }
 
 func New() (*bus, error) {
+log.Printf("I2C DEBUG: using FIXED rpi/i2c implementation (i2c-1)")
 	f, err := os.OpenFile("/dev/i2c-1", os.O_RDWR, os.ModeExclusive)
 	if err != nil {
 		return nil, err
@@ -78,6 +80,7 @@ func (b *bus) SetAddress(addr byte) error {
 func (b *bus) ReadBytes(addr byte, num int) ([]byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if err := b.SetAddress(addr); err != nil {
 		return []byte{0}, err
 	}
@@ -87,7 +90,7 @@ func (b *bus) ReadBytes(addr byte, num int) ([]byte, error) {
 		return nil, err
 	}
 	if n != num {
-		return []byte{0}, fmt.Errorf("i2c: Unexpected number (%v) of bytes read", n)
+		return []byte{0}, fmt.Errorf("i2c: unexpected number (%v) of bytes read", n)
 	}
 	return bytes, nil
 }
@@ -95,6 +98,7 @@ func (b *bus) ReadBytes(addr byte, num int) ([]byte, error) {
 func (b *bus) WriteBytes(addr byte, value []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if err := b.SetAddress(addr); err != nil {
 		return err
 	}
@@ -102,53 +106,77 @@ func (b *bus) WriteBytes(addr byte, value []byte) error {
 	return err
 }
 
+// ReadFromReg performs a proper I2C_RDWR combined transaction:
+//  1) write 1 byte register (pointer)
+//  2) read N bytes
+//
+// This avoids unsafe reflect.SliceHeader usage and avoids passing &reg (stack byte)
+// directly to ioctl, which can lead to silent 0x0000 reads on some systems.
 func (b *bus) ReadFromReg(addr, reg byte, value []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	hdrp := (*reflect.SliceHeader)(unsafe.Pointer(&value))
+	// stable 1-byte buffer for the register/pointer
+	regbuf := []byte{reg}
 
 	var msgs [2]message
 	msgs[0].addr = uint16(addr)
 	msgs[0].flags = 0
 	msgs[0].len = 1
-	msgs[0].buf = uintptr(unsafe.Pointer(&reg))
+	msgs[0].buf = uintptr(unsafe.Pointer(&regbuf[0]))
 
 	msgs[1].addr = uint16(addr)
 	msgs[1].flags = rd
 	msgs[1].len = uint16(len(value))
-	msgs[1].buf = uintptr(unsafe.Pointer(hdrp.Data))
+	if len(value) > 0 {
+		msgs[1].buf = uintptr(unsafe.Pointer(&value[0]))
+	} else {
+		msgs[1].buf = 0
+	}
 
-	var d ioctlData
+	d := ioctlData{
+		msgs: uintptr(unsafe.Pointer(&msgs[0])),
+		nmsg: 2,
+	}
 
-	d.msgs = uintptr(unsafe.Pointer(&msgs))
-	d.nmsg = 2
-	if err := b.SetAddress(addr); err != nil {
+	// NOTE: SetAddress is not required for I2C_RDWR (each message has addr).
+	// Calling it is harmless on most systems, but can cause weirdness on some.
+	if err := b.send(rdrwCmd, uintptr(unsafe.Pointer(&d))); err != nil {
 		return err
 	}
-	return b.send(rdrwCmd, uintptr(unsafe.Pointer(&d)))
+
+	// Ensure the GC keeps these alive until after ioctl completes.
+	runtime.KeepAlive(regbuf)
+	runtime.KeepAlive(value)
+
+	return nil
 }
 
+// WriteToReg writes register + bytes using a single I2C_RDWR message.
+// Avoids append()+reflect.SliceHeader unsafe pointer tricks.
 func (b *bus) WriteToReg(addr, reg byte, value []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	outbuf := append([]byte{reg}, value...)
-
-	hdrp := (*reflect.SliceHeader)(unsafe.Pointer(&outbuf))
+	outbuf := make([]byte, 1+len(value))
+	outbuf[0] = reg
+	copy(outbuf[1:], value)
 
 	var msg message
 	msg.addr = uint16(addr)
 	msg.flags = 0
 	msg.len = uint16(len(outbuf))
-	msg.buf = uintptr(unsafe.Pointer(hdrp.Data))
+	msg.buf = uintptr(unsafe.Pointer(&outbuf[0]))
 
-	var d ioctlData
-	d.msgs = uintptr(unsafe.Pointer(&msg))
-	d.nmsg = 1
+	d := ioctlData{
+		msgs: uintptr(unsafe.Pointer(&msg)),
+		nmsg: 1,
+	}
 
-	if err := b.SetAddress(addr); err != nil {
+	if err := b.send(rdrwCmd, uintptr(unsafe.Pointer(&d))); err != nil {
 		return err
 	}
-	return b.send(rdrwCmd, uintptr(unsafe.Pointer(&d)))
+
+	runtime.KeepAlive(outbuf)
+	return nil
 }

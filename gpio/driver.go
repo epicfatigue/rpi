@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+	"log"
 )
 
 type Direction uint8
@@ -37,6 +38,7 @@ type Driver struct {
 
 // Create from memory mapped data
 func CreateFromMmap(mem8 []uint8) *Driver {
+	log.Printf("[gpio] CreateFromMmap: mem8 len=%d cap=%d", len(mem8), cap(mem8))
 	header := *(*reflect.SliceHeader)(unsafe.Pointer(&mem8))
 	header.Len /= (32 / 8) // (32 bit = 4 bytes)
 	header.Cap /= (32 / 8)

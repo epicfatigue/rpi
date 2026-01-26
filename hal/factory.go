@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 
 	"github.com/reef-pi/hal"
@@ -55,7 +56,6 @@ func (f *rpiFactory) GetParameters() []hal.ConfigParameter {
 }
 
 func (f *rpiFactory) ValidateParameters(parameters map[string]interface{}) (bool, map[string][]string) {
-
 	var failures = make(map[string][]string)
 
 	var v interface{}
@@ -98,35 +98,55 @@ func (f *rpiFactory) NewDriver(parameters map[string]interface{}, _ interface{})
 	devMode := parameters["Dev Mode"].(bool)
 	frequency, _ := hal.ConvertToInt(parameters["Frequency"])
 
+	// ---------------------------------------------------------------------
+	// FIX: On Pi OS Bookworm / Pi 5, /dev/gpiomem may not exist, but GPIO
+	// is available via the character device interface (/dev/gpiochip0).
+	//
+	// If the user has Dev Mode enabled but gpiochip0 exists, automatically
+	// override to REAL mode so GPIO works.
+	// ---------------------------------------------------------------------
+	if devMode {
+		if _, err := os.Stat("/dev/gpiochip0"); err == nil {
+			log.Println("[rpi] gpiochip0 detected, overriding DEV Mode -> REAL mode")
+			devMode = false
+		} else {
+			log.Printf("[rpi] DEV Mode requested and gpiochip0 not available: %v", err)
+		}
+	}
+
 	var pwmDriver pwm.Driver
-	var pinFactory pinFactory
+	var pf pinFactory
 
 	if devMode {
 		log.Println("RPI Driver using DEV Mode")
 		pwmDriver, _ = pwm.Noop()
-		pinFactory = NoopPinFactory
+		pf = NoopPinFactory
 	} else {
+		log.Println("[rpi] RPI Driver using REAL GPIO mode")
 		pwmDriver = pwm.New()
-		pinFactory = newDigitalPin
+		pf = newDigitalPin
 	}
 
-	return newDriver(pwmDriver, pinFactory, f.meta, frequency)
+	return newDriver(pwmDriver, pf, f.meta, frequency)
 }
 
 func newDriver(pd pwm.Driver, factory pinFactory, meta hal.Metadata, frequency int) (hal.Driver, error) {
-
 	d := &driver{
 		pins:     make(map[int]*pin),
 		channels: make(map[int]*channel),
 		meta:     meta,
 	}
 
+	// IMPORTANT CHANGE:
+	// Don't fail the entire driver if a pin is busy (e.g., GPIO4 used by 1-Wire).
+	// Skip unavailable pins and keep going.
 	for i := range validGPIOPins {
 		p, err := factory(i)
-
 		if err != nil {
-			return nil, fmt.Errorf("can't build hal pin %d: %v", i, err)
+			log.Printf("[rpi] skipping GPIO %d: %v", i, err)
+			continue
 		}
+
 		name := fmt.Sprintf("GP%d", i)
 		d.pins[i] = &pin{
 			name:       name,
@@ -144,5 +164,6 @@ func newDriver(pd pwm.Driver, factory pinFactory, meta hal.Metadata, frequency i
 		}
 		d.channels[p] = ch
 	}
+
 	return d, nil
 }

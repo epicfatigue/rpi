@@ -3,7 +3,7 @@ package hal
 import (
 	"fmt"
 	"sort"
-
+	"strings"
 	"github.com/reef-pi/hal"
 	"github.com/reef-pi/rpi/pwm"
 )
@@ -20,31 +20,35 @@ func (r *driver) Metadata() hal.Metadata {
 }
 
 func (r *driver) Close() error {
-	for _, p := range r.pins {
-		err := p.Close()
-		if err != nil {
-			return fmt.Errorf("can't close hal driver due to channel %s", p.Name())
-		}
-	}
-	return nil
+    var errs []string
+    for _, p := range r.pins {
+        if err := p.Close(); err != nil {
+            errs = append(errs, fmt.Sprintf("%s: %v", p.Name(), err))
+        }
+    }
+    if len(errs) > 0 {
+        return fmt.Errorf("failed to close hal pins: %s", strings.Join(errs, "; "))
+    }
+    return nil
 }
 
-func (d *driver) Pins(cap hal.Capability) ([]hal.Pin, error) {
-	var pins []hal.Pin
-	switch cap {
-	case hal.DigitalInput, hal.DigitalOutput:
-		for _, pin := range d.pins {
-			pins = append(pins, pin)
-		}
-		return pins, nil
-	case hal.PWM:
-		for _, pin := range d.channels {
-			pins = append(pins, pin)
-		}
-		return pins, nil
-	default:
-		return nil, fmt.Errorf("Unsupported capability:%s", cap.String())
-	}
+
+func (r *driver) Pins(cap hal.Capability) ([]hal.Pin, error) {
+    var pins []hal.Pin
+    switch cap {
+    case hal.DigitalInput, hal.DigitalOutput:
+        for _, pin := range r.pins {
+            pins = append(pins, pin)
+        }
+        return pins, nil
+    case hal.PWM:
+        for _, pin := range r.channels {
+            pins = append(pins, pin)
+        }
+        return pins, nil
+    default:
+        return nil, fmt.Errorf("Unsupported capability:%s", cap.String())
+    }
 }
 
 func (r *driver) DigitalInputPins() []hal.DigitalInputPin {
